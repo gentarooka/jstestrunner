@@ -1,279 +1,138 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.    
- */
-
-/*global console, phantom, WebPage */
-
 /**
- * Process the test.
+ * Wait until the test condition is true or a timeout occurs. Useful for waiting
+ * on a server response or for a ui change (fadeIn, etc.) to occur.
+ *
+ * @param testFx javascript condition that evaluates to a boolean,
+ * it can be passed in as a string (e.g.: "1 == 1" or "$('#bar').is(':visible')" or
+ * as a callback function.
+ * @param onReady what to do when testFx condition is fulfilled,
+ * it can be passed in as a string (e.g.: "1 == 1" or "$('#bar').is(':visible')" or
+ * as a callback function.
+ * @param timeOutMillis the max amount of time to wait. If not specified, 3 sec is used.
  */
-function processTestAndLoadNext(testUrls) {
-	var testPage, testUrl, loadingTime, loadingTimeout;
-	
-	// loadingTimeout is how long (in MS) we wait for testPage.evaluate
-	// to succesfully evaluate the QUnit HTML. If this time is exceeded,
-	// then we proceed to the next test or end processing if no more tests
-	// exist.
-	loadingTime = new Date().getTime();
-	// This should be less than the timeout declared in
-	// JSTestResultServer.java (which is currently 30s)
-	loadingTimeout = 20000;
-	
-	testUrl = testUrls[0];
-	testUrls.splice(0, 1);
+function waitFor(testFx, onReady, timeOutMillis) {
+    var maxtimeOutMillis = timeOutMillis ? timeOutMillis : 3001, //< Default Max Timout is 3s
+        start = new Date().getTime(),
+        condition = false,
+        interval = setInterval(function() {
+            if ( (new Date().getTime() - start < maxtimeOutMillis) && !condition ) {
+                // If not time-out yet and condition not yet fulfilled
+                condition = (typeof(testFx) === "string" ? eval(testFx) : testFx()); //< defensive code
+            } else {
+                if(!condition) {
+                    // If condition still not fulfilled (timeout but condition is 'false')
+                    console.log("'waitFor()' timeout");
+                    phantom.exit(1);
+                } else {
+                    // Condition fulfilled (timeout and/or condition is 'true')
+                    console.log("'waitFor()' finished in " + (new Date().getTime() - start) + "ms.");
+                    typeof(onReady) === "string" ? eval(onReady) : onReady(); //< Do what it's supposed to do once the condition is fulfilled
+                    clearInterval(interval); //< Stop this interval
+                }
+            }
+        }, 100); //< repeat check every 250ms
+};
 
-	testPage = new WebPage();
+
+if (phantom.args.length === 0 || phantom.args.length > 2) {
+    console.log('Usage: run-qunit.js URL');
+    phantom.exit();
+}
+
+openUrl(phantom.args[0].split(","));
+
+function openUrl(testUrls) {
+	var testUrl = testUrls.shift();
 	
-	testPage.onConsoleMessage = function(msg) {
+	var page = new WebPage();
+
+	// Route "console.log()" calls from within the Page context to the main Phantom context (i.e. current "this")
+	page.onConsoleMessage = function(msg) {
 		console.log(msg);
 	};
-
-	testPage.open(testUrl, function(status) {
-		var testResultChecker;
-		
-		if (status === "success"){
-			testResultChecker = setInterval(function() {
-				var testResultsProcessed;
-				
-				testResultsProcessed = testPage.evaluate(function() {
-					var testResultsProcessed, testResults, testResultElem;
-			
-					/**
-					 * Notify the notifier using an HTTP POST. We send it asynchronously and don't
-					 * bother about a response. If tests fail at the consuming end then this should
-					 * an exception rather than the rule. Failing tests are better than false
-					 * positives.
-					 * 
-					 * @param testUrl
-					 *            the url of the test document the test relates to.
-					 * @param moduleName
-					 *            the module. Can be null.
-					 * @param testName
-					 *            the name of the test.
-					 * @param failed
-					 *            the number of assertions failing.
-					 * @param passed
-					 *            the number of assertions passing.
-					 */
-					function notify(testUrl, testResults) {
-
-						var failures, i, j, message, messages, passes, testResult, xhr;
-
-						failures = 0;
-						passes = 0;
-						messages = "";
-
-						for (j = 0; j < testResults.length; ++j) {
-							testResult = testResults[j];
-							if (testResult.moduleName !== null) {
-								message = "[" + testResult.moduleName + "] ";
-							} else {
-								message = "";
-							}
-							message += testResult.testName + ": failed: " + testResult.failed
-									+ " passed: " + testResult.passed;
-							for (i = 0; i < testResult.details.length; ++i) {
-								message += "\n  " + testResult.details[i].message + ", expected: "
-										+ testResult.details[i].expected;
-							}
-
-							if (j > 0) {
-								messages += "\n";
-							}
-							messages += message;
-
-							passes += testResult.passed;
-							failures += testResult.failed;
-						}
-
-						xhr = new XMLHttpRequest();
-						xhr.open("POST", "/testResults", false);
-						xhr.setRequestHeader("Content-Type", "application/json");
-						try {
-							xhr.send(JSON.stringify({
-								testUrl : testUrl,
-								passes : passes,
-								failures : failures,
-								message : messages
-							}));
-						} catch (e) {
-							// Just swallow exceptions as we can't do anything useful if there are
-							// comms errors.
-						}
-					}
-
-					/**
-					 * Parse the document for test results.
-					 */
-					function getTestResults() {
-						var details, failed, i, j, nodeList, nodeList2, moduleName, passed, testsElem, testItemElem, testItemElems, testName, testResults;
-
-						testResults = [];
-
-						testsElem = document.getElementById("qunit-tests");
-						if (testsElem !== null) {
-
-							testItemElems = testsElem.getElementsByTagName("li");
-
-							// For each test, collect the test results
-							for (i = 0; i < testItemElems.length; ++i) {
-								// Extract the microformatted data.
-								testItemElem = testItemElems[i];
-
-								// Not interested in the detailed messages.
-								if (testItemElem.parentNode === testsElem) {
-									nodeList = testItemElem.getElementsByClassName("module-name");
-									if (nodeList.length === 1) {
-										moduleName = nodeList[0].innerText;
-									} else {
-										moduleName = null;
-									}
-									nodeList = testItemElem.getElementsByClassName("test-name");
-									if (nodeList.length === 1) {
-										testName = nodeList[0].innerText;
-									} else {
-										testName = null;
-									}
-									nodeList = testItemElem.getElementsByClassName("failed");
-									if (nodeList.length === 1) {
-										failed = parseInt(nodeList[0].innerText, 10);
-									} else {
-										failed = null;
-									}
-									nodeList = testItemElem.getElementsByClassName("passed");
-									if (nodeList.length === 1) {
-										passed = parseInt(nodeList[0].innerText, 10);
-									} else {
-										passed = null;
-									}
-									nodeList = testItemElem.getElementsByClassName("test-message");
-									nodeList2 = testItemElem
-											.getElementsByClassName("test-expected");
-									details = [];
-									for (j = 0; j < nodeList.length; ++j) {
-										details.push({
-											message : nodeList[j].innerText,
-											expected : nodeList2[j].innerText
-										});
-									}
-
-									testResults.push({
-										moduleName : moduleName,
-										testName : testName,
-										failed : failed,
-										passed : passed,
-										details : details
-									});
-								}
-							}
-
-						} else {
-							console.log("Cannot find #qunit-tests element. Skipping test results.");
-							
-						}
-						
-						return testResults;
-					}
-
-					testResultElem = document.getElementById("qunit-testresult");
-
-					if (testResultElem && testResultElem.innerText.match("completed")) {
-
-						// Tests are complete. Drill down and extract all the test
-						// results from this one file.
-			
-						testResults = getTestResults();
-						
-						// Pass the data on for all tests per given test url.
-
-						notify(document.location.href, testResults);
-
-						// Signal that we're done processing the test results.
-						
-						testResultsProcessed = true;
-						
-					} else {
-						testResultsProcessed = false;
-					}
-					
-					return testResultsProcessed;
-				});
-			
-				/**
-				 * Continue with the next test, or exit if all tests are complete.
-				 */
-				function proceedWithTests() {
-					// Discontinue our checking for test results as we now have them.
-					
-					clearInterval(testResultChecker);
-					
-					// Run the next test or exit if no more.
-
-					if (testUrls.length === 0) {
-						phantom.exit();
-					} else {					
-						processTestAndLoadNext(testUrls);
-					}
-				}
-				
-				if (testResultsProcessed) {
-					proceedWithTests();
-					
-				} else {
-					
-					// If we're reached the timeout waiting for this test:
-					if (new Date().getTime() >= loadingTime + loadingTimeout) {
-						console.log("Unable to process test results, timed out");
-						
-						proceedWithTests();
-					}
-				}
-				
-			}, 100);
-
-		} else {
-			phantom.exit();
-		}
 	
-	});
-}
+	page.open(testUrl, function(status) {
+		if (status !== "success") {
+			console.log("Unable to access network");
+			phantom.exit();
+		} else {
+			bindQunit(page, testUrl);
 
-/**
- * Main control flow for Phantom.
- */
-function main() {
 
-	var testUrls;
+			var v = testUrl.split("/");
+			v.shift();
+			v.shift();
+			v.shift();
+			var name = "./" + v.join("/").split(".")[0] + "Test.js";
+			
+			var isLoaded = page.injectJs(name);
+			
+			if(!isLoaded) {
+				page.injectJs("./fail.js");
+			}
 
-	if (phantom.args.length === 1) {
+			page.evaluate(function() {
+				QUnit.load();
+			});
 
-		testUrls = phantom.args[0].split(',');
+			waitFor(function() {
+				return page.evaluate(function() {
+					if (typeof (runQunitFinished) == "undefined"
+							|| !runQunitFinished) {
+						return false;
+					}
+					;
 
-		if (testUrls.length > 0) {
-			processTestAndLoadNext(testUrls);
+					return true;
+				});
+			}, function() {
+				if (testUrls.length === 0) {
+					phantom.exit();
+				}
+				
+				openUrl(testUrls);
+			}, 10000);
 		}
-
-	} else {
-		console.log("Usage: run-qunit.js URL[,URL]*");
-		phantom.exit();
-
-	}
+	});
 
 }
 
-main();
+
+function bindQunit(page, testUrl) {
+	page.injectJs("./qunit.js");
+
+	page.evaluate("function() {testUrl = \"" + testUrl + "\";}");
+
+	page.evaluate(function() {
+		runQunitFinished = false;
+
+		var message = new Array();
+		QUnit.testDone(function(data) {
+			var m = data.module + "[" + data.name + "]  " + data.passed + "/"
+					+ data.total;
+			message.push(m);
+		});
+
+		QUnit.done(function(data) {
+			var xhr = new XMLHttpRequest();
+			xhr.open("POST", "/testResults", false);
+			xhr.setRequestHeader("Content-Type", "application/json");
+			try {
+				xhr.send(JSON.stringify({
+					testUrl : testUrl,
+					passes : data.passed,
+					failures : data.failed,
+					message : message.join("\n")
+				}));
+			} catch (e) {
+				// Just swallow exceptions as we can't do anything useful if
+				// there are
+				// comms errors.
+			}
+			
+			runQunitFinished = true;
+		});
+	});
+
+}
+

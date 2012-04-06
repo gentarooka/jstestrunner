@@ -234,11 +234,14 @@ public class JSTestSuiteRunner extends ParentRunner<URL> {
 		}
 
 		// Resolve the commandPattern from system properties.
-		String commandPattern = System
-				.getProperty("org.codehaus.jstestrunner.commandPattern");
-		if (commandPattern == null) {
-			commandPattern = "phantomjs '%1$s' %2$s";
+		String commandPath = System
+				.getProperty("org.codehaus.jstestrunner.commandPath");
+		
+		if (!commandPath.endsWith("/")) {
+			commandPath = commandPath + "/";
 		}
+		
+		String commandPattern = commandPath + "phantomjs '%1$s' %2$s";
 
 		// Test runner file path.
 		TestRunnerFilePath testRunnerFilePathAnnotation = testClass
